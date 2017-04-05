@@ -1,0 +1,386 @@
+---
+title: "Credit card default in Taiwan"
+author: "Ngoc Naomi Nguyen"
+date: "February 17, 2017"
+output: html_document
+---
+{r echo=FALSE, message=FALSE, warning=FALSE}
+
+The dataset I'm working with is demographic and payment information of 30000 credit card clients in Taiwan. It has 23 features and variable of default account. The dataset itself and its description can be retrieved [here:](archive.ics.uci.edu/ml/datasets/default+of+credit+card+clients). I want to explore this dataset to answer:
+
+**What are potential predictors for credit card defaults?**
+
+
+```{r setup, include=FALSE, echo = FALSE,message=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	cache=TRUE, cache.path = 'cache/', fig.path='figure/',
+	message = FALSE,
+	warning = FALSE
+)
+
+library(GGally)
+library(scales)
+library(MASS)
+library(reshape2)
+library(dplyr)
+library(gridExtra)
+library(ggplot2)
+
+
+credit <- readr::read_csv("C:/Users/Dancy Pants/OneDrive/CLASS PROJECTS/Data Analytics/default of credit card clients.csv")
+
+credit$default <- factor(credit$`default payment next month`,labels = c("No","Yes"))
+credit <- credit %>% select(-ID,-`default payment next month`)  %>% 
+  filter(EDUCATION >0 & EDUCATION < 4 & MARRIAGE > 0 & MARRIAGE <3) %>% 
+  mutate(SEX = factor(SEX,labels = c("male","female")),
+         EDUCATION = factor(EDUCATION,labels = c("Graduate","University","High school")),
+         MARRIAGE = factor(MARRIAGE,labels = c("Married","Single"))) %>%
+  group_by(default)
+
+
+```
+
+# Quick data exploration
+The datase is skewed, with 22.12% defaults.
+
+There are few samples falling into category `EDUCATION in c(0,4,5,6)` or `MARRIAGE in c(0,3)` and these values are not listed in the description or fall into category 'Other'. I will get rid of these values (<3% dataset) since I believe they need a separate analysis due to unreliable information.
+
+
+## Financial variables
+
+I start off with a plot matrix for financial variables. I expect variables of the same categories to tell similar information to each other so I will only include the latest information (and trim  `PAY_AMT1`) in this analysis to look at the effect of each type of information better (I plan to investigate the relationship of these variables in another time). Here we have scatter plots in the lower triangle, correlation in the upper triangle and density plots on the diagonal.
+```{r ggpair financial, fig.width=12 }
+credit$log10_PAY <- log10(1+credit$PAY_AMT1)
+fin.var<-c("LIMIT_BAL","PAY_0","BILL_AMT1","log10_PAY")
+
+
+my_dense<- function(data, mapping, ...) {
+  ggplot(data = data, mapping=mapping) +
+    geom_density() 
+}
+fin <- ggpairs(credit,columns = fin.var,aes(color = default),
+         diag = list(continuous = wrap('densityDiag',alpha = 0.5)),
+         upper = list(continuous = wrap('cor',size = 4)),
+         lower = list(continuous = wrap("points",position = "jitter",alpha = 1/20)))
+fin
+```
+
+The defaults have a larger proportion having low limit balance and delaying payments. As for the latest payment amount, it is  unclear and will be looked into as you read on. Bill amount seems to be similar between the defaults and nondefaults. I don't find any additional information from the scatterplot.
+
+
+I want to take a closer look in the limit balance since I have a strong feeling that this is a potential predictor for defaults. We can see from the graph below that the defaults tend to be denser in the area where balance limit is below fifty-something thousands. However, there are still default accounts with limit balance reaching 3 quarters of a million. The 5-statistics summary also agrees that the defaults are consistently have a distribution of lower limit balance.
+
+```{r limit balance,echo=FALSE}
+ggplot(credit, aes(LIMIT_BAL, ..density..,color = default)) + 
+  geom_freqpoly(bins = 50) + scale_x_continuous(breaks  =c(seq(0,250000,100000),500000),limits = c(0,500000))
+
+tapply(credit$LIMIT_BAL,INDEX = credit$default,FUN = summary)
+```
+
+Next, I look at the distribution of the latest payment status. These payment status variables have a suspicious chance of having wrong data. In the description, they are said to can only have values -1 and from 1 to 9. However, as seen from the graph, a big portion of them have values 0 and -2. These are also variables that I struggled between treating them as ordered categorical or numerical variables. Ploting a frequency polygon of PAY_0 and I notice that the distribution among the defaults is not normally distributed, as assumed by Naive Bayes, I made a note to myself to treat it as ordered categorical variable when modelling with Naive Bayes.
+
+The plot suggests that the defaults has higher proportion of variable `PAY_0` at values 1 or higher (payment delay is longer or equal to a month). 
+
+```{r payment status, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(credit,aes(PAY_0, ..density..,color = default)) + 
+  geom_freqpoly(bins = 100) + scale_x_continuous(breaks = -2:9)
+
+
+
+```
+
+As mentioned above, I don't find any interesting stories from bill amount variables from the scatterplot matrix. Looking at the density plot for `BILL_AMT1` confirms my quick conclusion. The summary statistics tell the same stories: mean and median for defaults are similar to those for non-defaults. However, I do notice that the bill amount for defaults vary less both in terms of range as well as interquartile range. We can limit the population of potential defaults here.
+
+```{r bill, echo=FALSE}
+ggplot(credit,aes(BILL_AMT1, ..density..,color = default)) + 
+  geom_freqpoly(bins = 100)
+
+  by(credit["BILL_AMT1"],credit$default,FUN = summary)
+```
+
+
+Looking at the density plot for payment amount, we can see that there is a large portion of the defaults concentrating around 0. In fact, nearly 30% of the defaults didn't make any payment while only nearly 15% of the nondefaults paid 0 last month. Further look into the summary statistics also points out that the default's payments are consistently lower.
+
+
+```{r payment amount, echo=FALSE}
+ggplot(credit,aes(log10_PAY, ..density..,color = default)) + 
+  geom_freqpoly(bins = 100)
+
+by(credit["log10_PAY"],credit$default,FUN = summary)
+cat("Proportion of the defaults who didn't make a payment: ", sum(credit$default=="Yes"&credit$PAY_AMT1==0)/sum(credit$default=="Yes"))
+cat("Proportion of the defaults who didn't make a payment: ", sum(credit$default=="No"&credit$PAY_AMT1==0)/sum(credit$default=="No"))
+
+
+```
+
+Even though the bill amount seems to be distributed the same way for the defaults, I wonder if the ratio of payment to1/7 previous bill can be interesting? So I made a new variable which has a value of ratio of payment to previous bill if the payment is less than the previous bill and 1 otherwise (my motivation is that there is less chance to default if you made a payment larger than you were last billed). With respect to this variable, it can be seen that the defaults have slightly larger proportion of low values and smaller proportion for high value.
+```{r new var, echo=FALSE}
+credit$prop1 <- ifelse(credit$BILL_AMT2>credit$PAY_AMT1,credit$PAY_AMT1/credit$BILL_AMT2,1)
+
+ggplot(credit,aes(prop1, color = default)) + 
+  geom_density(bins = 200)
+
+sum(credit$prop1<0.0375&credit$default=="No")/sum(credit$default=="No")
+tapply(credit$prop1,credit$default,summary)
+```
+
+
+Let's examine the interaction of all the financial variables including this new variable. I don't find any additional information by looking at pairwise interaction.
+```{r fin.new sum, fig.width=12, echo=FALSE}
+ggpairs(credit,columns = c("LIMIT_BAL","PAY_0","BILL_AMT1","log10_PAY","prop1"),aes(colour = default),
+         diag = list(continuous = wrap('densityDiag',alpha = 0.5)),
+         upper = list(continuous = wrap('cor',size = 4)),
+         lower = list(continuous = wrap("points",position = "jitter",alpha = 1/20)))
+```
+
+```{r t-test}
+fin.var.n <- c("LIMIT_BAL","PAY_0","BILL_AMT1","log10_PAY","prop1")
+
+t(sapply(credit[fin.var.n], function(x) 
+     unlist(t.test(x~credit$default)[c("estimate","p.value","statistic","conf.int")])))
+
+```
+Using t-test to test for difference in means, there is strong evidence that on average, the defaults have lower limit balance, longer payment delay, lower bill amount, lower payment amount, and lower ratio of payment to bill.
+
+##Demographic variables
+```{r demo, fig.width=10,echo=FALSE}
+ggpairs(credit,columns = c("AGE","SEX","MARRIAGE","EDUCATION"),aes(color = default),
+        lower = list(combo = "facetdensity",discrete = "facetbar"),
+        diag = list(continuous = wrap("densityDiag",alpha = 0.5)))
+```
+The defaults seem to share common demograpic traits with the nondefaults. Their pairwise interactions don't seem to be interesting either.
+
+```{r age_multivariate,fig.width=10}
+ggplot(data = credit, aes(AGE,color = default))+
+  geom_density()+
+  facet_wrap(~SEX + MARRIAGE + EDUCATION)
+```
+
+##Interaction of financial and demographic variables:
+
+Below is a plot matrix depicting the pairwise interaction of financial and demographic variables. Gender and marriage status don't seem to help understanding any financial variables better. As for education, the longer payment delay for defaults we found earlier is mainly due to those whose highest education is undergraduate or high school. On the contrary, the gap we saw in the new variable earlier is mainly due to those with graduate education.
+```{r pairwise demo and fin, fig.width=12}
+gridplot <- list()
+
+fin.var <- c("LIMIT_BAL","PAY_0","BILL_AMT1","log10_PAY","prop1")
+demo.var <- c("AGE","SEX","EDUCATION","MARRIAGE")
+i = 1
+for (d in demo.var){
+  if (d == "AGE"){
+    for (f in fin.var){
+      gridplot[[i]] <- ggplot(data = credit,aes_string(d,f,color = "default"))+geom_point(alpha = 1/10)
+      i = i+1
+    }
+  }
+  else{
+    for (f in fin.var){
+      gridplot[[i]] <- ggplot(data = credit,aes_string(y= f,d,color = "default"))+geom_boxplot()
+      i = i+1
+    }}
+}
+
+ggmatrix(gridplot,ncol = 5,nrow = 4)
+```
+
+
+I then facet the density plot of each variable to seek for further insight.
+
+For example, we still see that the defaults tend to have low limit balance and that is still true, but less apparent for people with graduate education and more highlighted for males with high school education.
+```{r limit balance facet, fig.width=10}
+ggplot(data = credit, aes(LIMIT_BAL,color = default))+
+    geom_density()
+ggplot(data = credit, aes(LIMIT_BAL,color = default))+
+    geom_density()+
+    facet_wrap(~SEX + MARRIAGE + EDUCATION)
+
+```
+
+People with different backgrounds of sex, marriage, education seem to share same pattern of payment delay.
+```{r payment delay facet, fig.width=10}
+ggplot(data = credit, aes(PAY_0,color = default))+
+    geom_density()
+ggplot(data = credit, aes(PAY_0,color = default))+
+    geom_density()+
+    facet_wrap(~SEX + MARRIAGE + EDUCATION)
+```
+
+So is bill payment.
+```{r bill facet, fig.width=10}
+ggplot(data = credit, aes(BILL_AMT1,color = default))+
+    geom_density()
+ggplot(data = credit, aes(BILL_AMT1,color = default))+
+    geom_density()+
+    facet_wrap(~SEX + MARRIAGE + EDUCATION)
+```
+
+The payment amount seems to be indiscriminant of sex, marriage status, and education level.
+```{r payment facet, fig.width=10}
+ggplot(data = credit, aes(log10_PAY,color = default))+
+    geom_density()
+ggplot(data = credit, aes(log10_PAY,color = default))+
+    geom_density()+
+    facet_wrap(~SEX + MARRIAGE + EDUCATION)
+```
+Our new variable yields something interesting! We can see that males with high school or bachelor education and married females with high school education and single females with university education have much higher proportion for low value of this variable.
+```{r prop1 facet, fig.width=10}
+ggplot(data = credit, aes(prop1,color = default))+
+    geom_density()
+ggplot(data = credit, aes(prop1,color = default))+
+    geom_density()+
+    facet_wrap(~SEX + MARRIAGE + EDUCATION)
+#male graaduates,
+```
+
+Plotting financial variables against age doesn't seem to reveal anything interesting.
+
+
+```{r age and fin, fig.width=10,echo=FALSE}
+gridplot <- list()
+
+
+i = 1
+
+for (f in fin.var.n){
+  if (f =="PAY_AMT1"){
+    gridplot[[i]] <- ggplot(data = credit,aes_string("AGE",f,color = "default"))+geom_point(alpha = 1/10)+ylim(0,100000)
+  }
+  else{gridplot[[i]] <- ggplot(data = credit,aes_string("AGE",f,color = "default"))+geom_point(alpha = 1/10)}
+  i = i+1
+}
+
+ggmatrix(gridplot,ncol=3,nrow = 2)
+
+
+```
+##Univariate Analysis
+
+**What is the structure of your dataset?**
+
+There are 30,000 credit card accounts in the original dataset with 25 features. However, this analysis targets at only 9 variables, including demographic variables, latest financial information variables and a newly-created variable. There are accounts with categories not listed in the original data description so I removed those together with accounts with "Other" values as I want to investigate these in another analysis. The dataset I'm working with now only consists of 29,163 samples with 9 features:
+
+- default: my target variable, indicating whether the account is default. 22.34% are defaults in the dataset.
+- Age
+- Sex
+- Marriage
+- Education
+- Limit balance
+- PAY_0: payment delays in months in the latest month (some values not listed in the  [original data description](archive.ics.uci.edu/ml/datasets/default+of+credit+card+clients))
+- BILL_AMT1: bill amount in the latest month
+- PAY_AMT1: payment amount in the latest month
+- prop1: ratio of `PAY_AMT1` to `BILL_AMT2` if `PAY_AMT1` < `BILL_AMT2` and 1 otherwise. My motivation is if `PAY_AMT1` >= `BILL_AMT2` then the account can be considered as paid in full (This is only an assumption)
+
+```{r sum of vars}
+my.summary <- function(x){tapply(x,credit$default,summary)}
+lapply(credit %>% select(LIMIT_BAL,AGE,SEX,EDUCATION,MARRIAGE,PAY_0,BILL_AMT1,PAY_AMT1,prop1),my.summary)
+
+```
+
+Other observations:
+
+- This dataset is skewed and has a lot of outliers in terms of limit balance, payment amount, and bill amount. However, this is not unusual in  personal finance so I still see them as relevant data points.
+- The range of financial values for the defaults are thinner than for the nondefaults so we can narrow some lines here.
+- The quantitative variables have low correlation to each other.
+
+
+**What is/are the main feature(s) of interest in your dataset?**
+The feature I'm interested in defaults. I want to use the other variables to build a model to predict this variable, i.e. identifying credit card default. 
+
+
+
+***Did you create any new variables from existing variables in the dataset?**
+I created a variable for the ratio of payment from the latest month to the bill amount from the previous month. My motivation is that the defaults will more likely to pay less a proportion of their bill. However, there are some accounts that has payment larger than their previous bill so I set the value 1 for these accounts. Therefore the range of values for this variable is 0 to 1.
+
+
+##Bivariate Analysis
+I din't spend as much time on univariate analysis since this is a classification problem and I wish to see the interactions of the predictors with the chance of defaults as much as I could.
+
+
+**Of the features you investigated, were there any unusual distributions? Did you perform any operations on the data to tidy, adjust, or change the form of the data? If so, why did you do this?**
+The payment amount variable is especially skewed with more than 10% are outliers and the range in 100 times wider than the interquartile range. To deal with this, I take a log base 10 of this variable (added 1) and it looked more even though nowhere has the bell shaped like Gaussian distribution. I also deleted the unsual values of the categorical variables for the reason mentioned in the beginning of the analysis.
+
+
+**Talk about some of the relationships you observed in this part of the investigation. How did the feature(s) of interest vary with other features in the dataset?**
+The defaults tend to have lower limit balance, longer payment delay, lower payment amount, lower ratio of payment to bill as well as lower bill amount. I don't see a strong connection between demographical variables and the chance of default on its own but we can see that as we segmented the accounts against these demographical variables, we have a clearer picture of the chance of default.
+
+**Did you observe any interesting relationships between the other features (not the main feature(s) of interest)?**
+I didn't. The variables seem to have low pairwise correlation.j
+
+**What was the strongest relationship you found?**
+In terms of each feature's ability to distinguish the defaults on its own, I found that payment status (payment delay in months) and limit balance are really strong since there is a clear cut that we can see from this cut forward we can find more or less defaults (higher or lower density) than normal. Besides, ratio of payment to bill (my newly created variable) and payment amount are helpful too. The demographical features and bill amount don't seem to be helpful on their own but they helped to me to understand other variables clearer.
+
+
+##Multivariate Analysis
+**Talk about some of the relationships you observed in this part of the investigation. Were there features that strengthened each other in terms of looking at your feature(s) of interest?**
+Slicing up the financial variables against the demographical variables helps to reveal the relationship of the financial predictors to chance of defaults better. For example, it is very clear that ratio of payment to bill is lower for defaults among males who don't have graduate levels while we don't have the same observation with other types of clients.
+
+
+**Were there any interesting or surprising interactions between features?**
+I find the quantitative variables to have low correlation with each other. The categorical variables, however, helped to see how the numerical variables differ in populations of different characteristics.
+
+**OPTIONAL: Did you create any models with your dataset? Discuss the strengths and limitations of your model.**
+I didn't. But I think random forest or other ensemble methods built from classification trees will be promising models. 
+
+#Final plots and Summary
+
+The data is skewed on the proportion of defaults: 22.34% of the dataset are defaults.
+
+##Plot One
+```{r Plot One, fig.width=9}
+
+ggplot(credit,aes(PAY_0,fill = default))+ 
+  geom_bar(position = "fill") +scale_x_continuous(breaks = -2:8)+scale_color_discrete() + 
+  geom_hline(yintercept = 0.2234)+
+  ggtitle("Latest payment status and chance of default") + xlab("Payment delay in months") + ylab("Chance of default")
+
+```
+###Description One
+
+The plot illustrate the relationship of default and payment delay in months. The black horizontal line is the benchmark proportion of the defaults out of the whole dataset at 22.34%. Defaults are found at a higher rate among accounts with payment delay and at lower rate among accounts with no payment delay.
+
+
+##Plot Two
+```{r Plot Two,fig.width=10}
+index.lim <- which(credit$EDUCATION != "Graduate")
+p1l <- ggplot(data = credit, aes(LIMIT_BAL,color = default))+     geom_density()+
+  xlab("Limit balance") + ylab("Chance of default")+ggtitle("Limit balance and chance of default")+
+  facet_wrap(~ifelse(EDUCATION =="Graduate","Graduate","Without graduation degree")) 
+p2l <- ggplot(data = credit, aes(LIMIT_BAL,color = default))+     geom_density()+
+  xlab("Limit balance (All)") +ylab("Chance of default")
+grid.arrange(p1l,p2l,nrow = 2, ncol = 1)
+#barplot(prop.table(table(credit$default)), main = "Default for Credit Card Accounts",col = c("red","turquoise"),ylim = c(0,1))
+```
+
+###Description Two
+This plots the relationship of default and limit balance as well as a corresponding breakdown against education level. Although we can see the relationship of chance od default and limit balance very clear, breaking it down with education levels reveals that for people with graduate education, the distinction is not very clear while for those without, there's a much larger portion of defaults to have low limit balance.
+
+
+##Plot Three
+```{r Plot Three}
+index <- with(credit,which((SEX == "male" & EDUCATION !="Graduate")|
+                             (SEX == "female" & MARRIAGE =="Married" & EDUCATION =="High school")|
+                             (SEX == "female" & MARRIAGE =="Single" & EDUCATION =="University")))
+ggplot(data = credit[index,], aes(prop1,color = default))+geom_density()+
+  ggtitle("Among males without graduate education, married females with high school degree, and single females with university education")+
+  xlab("Payment to bill")
+ggplot(data = credit[-index,], aes(prop1,color = default))+geom_density()+
+  ggtitle("Among others")+
+  xlab("Payment to bill")
+```
+
+###Description Three
+Payment to bill have very different predictive power on two populations of the clients. On one segment, defaults has a higher prevalence of having very low or very high ratio. On the other, defaults have the same prevalence of having low ratio but bigger portion of having high values of this ratio.
+
+
+#Reflection
+I want to find out some determinants of credit card default. The original dataset I worked with to answer this question contains financial and general information (25 features) of 30,000 credit card accounts in Taiwan. Of these, I left out some samples with suspicious or minority values for another analysis to look into them carefully. I also selected the latest information out of similar financial variables. The finalized dataset has 29,163 samples and 9 features including a feature I constructed.
+
+I started off by comparing the distributions of quantitative variables among those who defaulted and those who didn't. I also look at the distribution of defaults in terms of proportion by each qualitative variable. I proceed with looking at the interaction of variables with respect to defaults.
+
+My target response variable, `default`, is unbalanced with only 22.34% being defaults. This is a skewed dataset but the level of skewness is less than normal default rate found by most banks.
+
+I found that there is a clear association between defaults and low limit balance as well as long payment delay. One can also have better chances of betting on the defaults on certain intervals of payment amount and payment-to-bill ratio as well. However, as I break the dataset down into categories of sex, marriage status, and education, I see a clearer picture of how defaults behave different from the rest. In particular, defaults with graduate education behave quite normally interms of limit balance while an unusually high rate of those without only have low limit balance. In addition, a large portion of males without graduate degrees as well as married women with high school education and single women with college levels have a low ratio of payment to bill. On the other hand, bill amount and age don't seem to reveal anything interesting.
+
+The analysis builds my belief that ensemble methods of classification tree like random forest will work well while logistice regression or support vector machine are unlikely to succeed.
+
+The analysis has two major limitations: firstly, some samples are not included in the dataset (<3%). Secondly, the dataset contains values not described in the original dataset description. For values that only account for a small portion of the dataset, they are included in the samples I talked about leaving out above. As for undescribed values that account for a considerable amount of data, such as `PAY_0 = 0`, I kept them in the analysis.
