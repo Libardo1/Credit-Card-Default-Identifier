@@ -1,0 +1,25 @@
+=================================================================
+I.	Credit card default Identification project
+=================================================================
+This project analyses the credit card payment history of customers in Taiwan to build a predictive model towards identifying credit card defaults. The dataset can be retrieved at http://archive.ics.uci.edu/ml/datasets/default+of+credit+card+clients.
+I begin cleaning the data by exploring the data variables. I notice that some variables contain values not specified in the dataset description (for example, variables on history payment such as PAY_0 contains value 0 and -2, unspecified in the description or variable Education contains 5,6,0, also unspecified). I decided to keep the numerical features as are. As for the categorical variables, after finding out that the frequencies of those unexpected values are low, I group them together (I did so for ‘Education’ and ‘Marriage’). After that, I factor the categorical variables, including the response variable ‘default’ and omit missing values.
+
+	I also notice that the response variable is skewed with only 22% are defaults, which makes sense. Therefore I group the dataset by the response variable to ensure the structure in later splittings. Since my dataset is relatively large with 30,000 samples, I randomly selected 80% data to build and evaluate the model and the other 20% just to test how responsive the optimal model is to unprecedented data.
+
+	After cleaning the data, I planned to start by building models with all the features, then reduce the features by combination of backward and forward selection, build the reduced models, and finally compare all the models based on AUC. The models I employed are: logistic regression (GLM), k-nearest neighbors (KNN), linear support vector classifier (linear SVM), Naïve Bayes (NB) with kernel, and random forest (RF).
+
+	I use the default bootstrapping technique and set my tuning controls to turn on the options ‘twoclassSummary’ and ‘classProbs’ to choose the optimal parameter on metric AUC (or ‘ROC’). Then I tuned on KNN, linear SVM, and RF using 5 values to tune for each parameter (I will extend the range if the optimal parameter is at the endpoints). I also scale and center the data when tune and train the KNN and SVM models since the algorithms are distance-based. The optimal parameters I found for the full models are: k = 13 (KNN),
+mtry = 2 (RF) and cost = 0.5 (linear SVM).
+
+	After that I train my 5 full models with 5 10-fold cross-validation technique. I also turned on ‘twoclassSummary’ and ‘classProbs’ to use ‘ROC’ metric and ‘savePredictions’ to save predictions. I used the optimal parameters found in tuning process and just as above, I scale and center data for KNN and linear SVM.
+
+	I proceed to run a backward and forward selection to select the most important features. The subsequent tuning and training models are implemented as described above; the only difference is the reduced set of features is used this time.
+	So I have 10 models, of 5 model types and 2 sets of features. I use ‘summary’ on ‘resamples’ on models to see the summary statistics for AUC and sensitivity of each model across resamples. The random forest model with the reduced set of features leads in both mean and median AUC across resamples. I look for the ROC plots to have a better picture of the model’s relative performance. The plot suggests that the reduced random forest dominates at every cutoff.
+
+	The reduced random forest model’s AUC is 76.83%, meaning that there is a 76.83% chance it will give a higher probability to a true default case than a true non-default case. Next I compare the model’s performance on validation set with the performance on the training set, which is almost 100%. There is strong evidence that the model overfits.
+
+	Because of the possibility of overfitting of the best performing model, I want to look into the runner up model as well, the reduced Naïve Bayes. The model’s AUC on the training set is 75.28% while that on the test set is 73.87%. Since the reduced Naïve Bayes model has weak chance of overfitting and performed almost as well as the best-performing model, the reduced random forest, it is an attractive alternative as well.
+
+	Overall, this project finds that the reduced random forest is the optimal model with AUC is 76.83%. The reduced Naïve Bayes is an attractive alternative. More clarity of the data, in regards of the values undescribed, is needed.
+
+
